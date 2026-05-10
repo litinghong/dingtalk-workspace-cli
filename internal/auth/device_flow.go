@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -52,6 +53,12 @@ type DeviceFlowProvider struct {
 	logger          *slog.Logger
 	Output          io.Writer
 	httpClient      *http.Client
+}
+
+type pendingDeviceFlow struct {
+	ClientID string             `json:"clientId"`
+	Auth     DeviceAuthResponse `json:"auth"`
+	Created  time.Time          `json:"createdAt"`
 }
 
 func NewDeviceFlowProvider(configDir string, logger *slog.Logger) *DeviceFlowProvider {
@@ -161,28 +168,15 @@ func (p *DeviceFlowProvider) resetCredentialState() {
 }
 
 func (p *DeviceFlowProvider) Login(ctx context.Context) (*TokenData, error) {
-	// Defensive reset: clear any stale credential state from previous login
-	// methods (OAuth scan, PAT, etc.) so we always re-fetch from MCP.
-	// This ensures --device login works regardless of what app.json contains.
-	p.resetCredentialState()
-
-	if p.logger != nil {
-		p.logger.Debug("fetching client ID from MCP server (device flow always re-fetches)")
-	}
-	mcpClientID, mcpErr := FetchClientIDFromMCP(ctx)
-	if mcpErr != nil {
-		return nil, fmt.Errorf("%s: %w", i18n.T("获取 Client ID 失败"), mcpErr)
-	}
-	p.clientID = mcpClientID
-	SetClientIDFromMCP(mcpClientID)
-	if p.logger != nil {
-		p.logger.Debug("fetched client ID from MCP server", "clientID", mcpClientID)
+	if err := p.ensureClientID(ctx); err != nil {
+		return nil, err
 	}
 
 	const maxAttempts = 3
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		tokenData, err := p.loginOnce(ctx, attempt)
 		if err == nil {
+			_ = p.clearPendingDeviceFlow()
 			return tokenData, nil
 		}
 		if isInvalidGrantError(err) && attempt < maxAttempts {
@@ -193,6 +187,87 @@ func (p *DeviceFlowProvider) Login(ctx context.Context) (*TokenData, error) {
 		return nil, err
 	}
 	return nil, fmt.Errorf("%s", i18n.Tf("设备授权流程失败（已重试 %d 次）", maxAttempts))
+}
+
+func (p *DeviceFlowProvider) InitLogin(ctx context.Context) error {
+	if err := p.ensureClientID(ctx); err != nil {
+		return err
+	}
+	dfPrintStep(p.output(), 1, i18n.T("请求设备授权码..."), 0)
+	_, _ = fmt.Fprintln(p.output(), "")
+
+	authResp, err := p.requestDeviceCode(ctx)
+	if err != nil {
+		return fmt.Errorf("%s: %w", i18n.T("请求设备授权码失败"), err)
+	}
+	dfPrintDeviceCodeBox(p.output(), authResp)
+	if authResp.VerificationURIComplete != "" {
+		if bErr := openBrowser(authResp.VerificationURIComplete); bErr != nil && p.logger != nil {
+			p.logger.Debug("could not open browser", "error", bErr)
+		}
+	}
+	return p.savePendingDeviceFlow(&pendingDeviceFlow{
+		ClientID: p.clientID,
+		Auth:     *authResp,
+		Created:  time.Now(),
+	})
+}
+
+func (p *DeviceFlowProvider) WaitLogin(ctx context.Context) (*TokenData, error) {
+	pending, err := p.loadPendingDeviceFlow()
+	if err != nil {
+		return nil, err
+	}
+	if pending.ClientID == "" {
+		return nil, errors.New(i18n.T("设备流会话缺少 client_id，请重新执行 dws auth login --device --device-step init"))
+	}
+	p.clientID = pending.ClientID
+
+	auth := pending.Auth
+	if !pending.Created.IsZero() && auth.ExpiresIn > 0 {
+		elapsed := int(time.Since(pending.Created).Seconds())
+		if elapsed >= auth.ExpiresIn {
+			_ = p.clearPendingDeviceFlow()
+			return nil, errors.New(i18n.T("设备授权码已过期，请重新执行 dws auth login --device --device-step init"))
+		}
+		auth.ExpiresIn -= elapsed
+	}
+
+	dfPrintStep(p.output(), 2, i18n.T("等待用户授权..."), 0)
+	dfPrintDim(p.output(), fmt.Sprintf(i18n.T("  (每 %d 秒轮询一次)"), auth.Interval))
+	_, _ = fmt.Fprintln(p.output(), "")
+
+	tokenResult, err := p.waitForAuthorization(ctx, &auth)
+	if err != nil {
+		return nil, err
+	}
+	tokenData, err := p.finalizeLogin(ctx, tokenResult.AuthCode)
+	if err != nil {
+		return nil, err
+	}
+	_ = p.clearPendingDeviceFlow()
+	return tokenData, nil
+}
+
+func (p *DeviceFlowProvider) ensureClientID(ctx context.Context) error {
+	// Defensive reset: clear any stale credential state from previous login
+	// methods (OAuth scan, PAT, etc.) so we always re-fetch from MCP.
+	// This ensures --device login works regardless of what app.json contains.
+	p.resetCredentialState()
+
+	if p.logger != nil {
+		p.logger.Debug("fetching client ID from MCP server (device flow always re-fetches)")
+	}
+	mcpClientID, mcpErr := FetchClientIDFromMCP(ctx)
+	if mcpErr != nil {
+		return fmt.Errorf("%s: %w", i18n.T("获取 Client ID 失败"), mcpErr)
+	}
+	p.clientID = mcpClientID
+	SetClientIDFromMCP(mcpClientID)
+	if p.logger != nil {
+		p.logger.Debug("fetched client ID from MCP server", "clientID", mcpClientID)
+	}
+	return nil
 }
 
 func (p *DeviceFlowProvider) loginOnce(ctx context.Context, attempt int) (*TokenData, error) {
@@ -220,6 +295,14 @@ func (p *DeviceFlowProvider) loginOnce(ctx context.Context, attempt int) (*Token
 		return nil, err
 	}
 
+	tokenData, err := p.finalizeLogin(ctx, tokenResult.AuthCode)
+	if err != nil {
+		return nil, err
+	}
+	return tokenData, nil
+}
+
+func (p *DeviceFlowProvider) finalizeLogin(ctx context.Context, authCode string) (*TokenData, error) {
 	_, _ = fmt.Fprintln(p.output(), "")
 	dfPrintStep(p.output(), 3, i18n.T("使用授权码换取 Access Token..."), 0)
 
@@ -228,12 +311,11 @@ func (p *DeviceFlowProvider) loginOnce(ctx context.Context, attempt int) (*Token
 		clientID:  p.clientID,
 		logger:    p.logger,
 	}
-	tokenData, err := oauthProvider.exchangeCode(ctx, tokenResult.AuthCode)
+	tokenData, err := oauthProvider.exchangeCode(ctx, authCode)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", i18n.T("换取 token 失败"), err)
 	}
 
-	// Check if CLI auth is enabled for this organization (fail-closed: block on error)
 	dfPrintStep(p.output(), 4, i18n.T("检查组织 CLI 授权状态..."), 0)
 	authStatus, authErr := oauthProvider.CheckCLIAuthEnabled(ctx, tokenData.AccessToken)
 	if authErr != nil {
@@ -317,8 +399,50 @@ func (p *DeviceFlowProvider) loginOnce(ctx context.Context, attempt int) (*Token
 			_ = SaveAppConfig(p.configDir, &AppConfig{ClientID: p.clientID})
 		}
 	}
-
 	return tokenData, nil
+}
+
+func (p *DeviceFlowProvider) pendingDeviceFlowPath() string {
+	return filepath.Join(p.configDir, "device_flow_pending.json")
+}
+
+func (p *DeviceFlowProvider) savePendingDeviceFlow(data *pendingDeviceFlow) error {
+	body, err := json.Marshal(data)
+	if err != nil {
+		return fmt.Errorf("%s: %w", i18n.T("序列化设备流会话失败"), err)
+	}
+	if err := os.MkdirAll(p.configDir, 0o700); err != nil {
+		return fmt.Errorf("%s: %w", i18n.T("创建配置目录失败"), err)
+	}
+	if err := os.WriteFile(p.pendingDeviceFlowPath(), body, 0o600); err != nil {
+		return fmt.Errorf("%s: %w", i18n.T("保存设备流会话失败"), err)
+	}
+	return nil
+}
+
+func (p *DeviceFlowProvider) loadPendingDeviceFlow() (*pendingDeviceFlow, error) {
+	body, err := os.ReadFile(p.pendingDeviceFlowPath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, errors.New(i18n.T("未找到待处理的设备流会话，请先执行 dws auth login --device --device-step init"))
+		}
+		return nil, fmt.Errorf("%s: %w", i18n.T("读取设备流会话失败"), err)
+	}
+	var data pendingDeviceFlow
+	if err := json.Unmarshal(body, &data); err != nil {
+		return nil, fmt.Errorf("%s: %w", i18n.T("解析设备流会话失败"), err)
+	}
+	if data.Auth.DeviceCode == "" || data.Auth.UserCode == "" {
+		return nil, errors.New(i18n.T("设备流会话无效，请重新执行 dws auth login --device --device-step init"))
+	}
+	return &data, nil
+}
+
+func (p *DeviceFlowProvider) clearPendingDeviceFlow() error {
+	if err := os.Remove(p.pendingDeviceFlowPath()); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }
 
 func (p *DeviceFlowProvider) requestDeviceCode(ctx context.Context) (*DeviceAuthResponse, error) {

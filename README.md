@@ -134,6 +134,8 @@ A backup of the current version is automatically created before each upgrade. Us
 ```bash
 dws auth login            # browser opens automatically
 dws auth login --device   # for headless environments (Docker, SSH, CI)
+dws auth login --device --device-step init  # print auth link/code only, then exit
+dws auth login --device --device-step wait  # block, wait for approval, then finish login
 ```
 
 Select your organization and authorize. That's it.

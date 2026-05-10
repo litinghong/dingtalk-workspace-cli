@@ -1,19 +1,44 @@
 # 全局参考
 
+## CLI 可执行文件（发布约定）
+
+为保证 skill 可离线分发且不依赖宿主机预装 `dws`，建议将 Linux amd64 二进制放在：
+
+- `skills/bin/dws`
+
+命令解析优先级：
+
+1. `DWS_BIN`（显式指定）
+2. `skills/bin/dws`（随 skill 分发）
+3. `PATH` 中的 `dws`（兜底）
+
+示例：
+
+```bash
+if [ -n "${DWS_BIN:-}" ] && [ -x "${DWS_BIN}" ]; then
+  DWS_CMD="${DWS_BIN}"
+elif [ -x "skills/bin/dws" ]; then
+  DWS_CMD="$(pwd)/skills/bin/dws"
+else
+  DWS_CMD="dws"
+fi
+```
+
 ## 认证
 
 ```bash
-# 首次: OAuth 设备流登录 (钉钉扫码授权)
-dws auth login
+# 设备流两阶段（先输出授权链接与授权码，再等待授权）
+"$DWS_CMD" auth login --device --device-step init
+"$DWS_CMD" auth login --device --device-step wait
 
 # 查看状态
-dws auth status
+"$DWS_CMD" auth status
 
 # 退出
-dws auth logout
+"$DWS_CMD" auth logout
 
 # 重置本地凭证 (Token 解密失败时使用)
-dws auth reset
+"$DWS_CMD" auth reset
 ```
 
 登录后自动管理 token 刷新，日常使用无需重复登录。
@@ -38,6 +63,10 @@ dws auth login
 
 # 或使用 --device 设备流登录（远程服务器/Docker）
 dws auth login --device
+
+# 或使用两阶段设备流（适合分离终端执行）
+dws auth login --device --device-step init
+dws auth login --device --device-step wait
 ```
 refresh_token 单设备独占，远程刷新后源设备凭证失效。
 

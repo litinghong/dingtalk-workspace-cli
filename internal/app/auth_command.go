@@ -31,9 +31,10 @@ import (
 )
 
 type authLoginConfig struct {
-	Token  string
-	Force  bool
-	Device bool
+	Token      string
+	Force      bool
+	Device     bool
+	DeviceStep string
 }
 
 func buildAuthCommand() *cobra.Command {
@@ -83,6 +84,8 @@ func newAuthLoginCommand() *cobra.Command {
 示例:
   dws auth login              # 本机扫码登录 (loopback 流)
   dws auth login --device     # SSH 远程 / 无头环境登录 (设备流)
+  dws auth login --device --device-step init  # 仅输出设备授权链接并结束
+  dws auth login --device --device-step wait  # 阻塞等待并完成登录
   dws auth login --force      # 强制重新登录 (忽略缓存 token)
   dws auth login --token xxx  # 使用指定 token`,
 		DisableAutoGenTag: true,
@@ -109,7 +112,18 @@ func newAuthLoginCommand() *cobra.Command {
 
 				provider := authpkg.NewDeviceFlowProvider(configDir, nil)
 				provider.Output = cmd.ErrOrStderr()
-				tokenData, err = provider.Login(loginCtx)
+				switch cfg.DeviceStep {
+				case "init":
+					if err = provider.InitLogin(loginCtx); err != nil {
+						return apperrors.NewAuth(fmt.Sprintf("device authorization init failed: %v", err))
+					}
+					fmt.Fprintln(cmd.OutOrStdout(), "[OK] 设备授权信息已生成，请在完成浏览器授权后执行: dws auth login --device --device-step wait")
+					return nil
+				case "wait":
+					tokenData, err = provider.WaitLogin(loginCtx)
+				default:
+					tokenData, err = provider.Login(loginCtx)
+				}
 				if err != nil {
 					return apperrors.NewAuth(fmt.Sprintf("device authorization failed: %v", err))
 				}
@@ -164,6 +178,7 @@ func newAuthLoginCommand() *cobra.Command {
 	}
 	cmd.Flags().String("token", "", "Access token")
 	cmd.Flags().Bool("device", false, "Use device authorization flow")
+	cmd.Flags().String("device-step", "full", "Device flow step: full, init, wait")
 	cmd.Flags().Bool("force", false, "Force interactive login (ignore cached token)")
 	// Hidden compatibility flags
 	cmd.Flags().String("redirect-url", "", "Loopback redirect URL")
@@ -426,10 +441,26 @@ func resolveAuthLoginConfig(cmd *cobra.Command) (authLoginConfig, error) {
 	if err != nil {
 		return authLoginConfig{}, apperrors.NewInternal("failed to read --force")
 	}
+	deviceStep, err := cmd.Flags().GetString("device-step")
+	if err != nil {
+		return authLoginConfig{}, apperrors.NewInternal("failed to read --device-step")
+	}
+	deviceStep = strings.ToLower(strings.TrimSpace(deviceStep))
+	switch deviceStep {
+	case "", "full":
+		deviceStep = "full"
+	case "init", "wait":
+	default:
+		return authLoginConfig{}, apperrors.NewValidation("--device-step must be one of: full, init, wait")
+	}
+	if !device && deviceStep != "full" {
+		return authLoginConfig{}, apperrors.NewValidation("--device-step requires --device")
+	}
 	return authLoginConfig{
-		Token:  strings.TrimSpace(token),
-		Force:  force,
-		Device: device,
+		Token:      strings.TrimSpace(token),
+		Force:      force,
+		Device:     device,
+		DeviceStep: deviceStep,
 	}, nil
 }
 

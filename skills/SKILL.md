@@ -19,6 +19,32 @@ cli_version: ">=1.0.15"
 - 单次批量操作不超过 30 条记录
 - 所有命令必须**严格遵循**对应产品参考文档里面规定的参数格式（如：如果有参数值，则参数和参数值之间至少用一个空格隔开）
 
+## dws 可执行文件定位（发布版）
+
+发布 skill 时，`dws` 二进制默认放在：
+
+- `skills/bin/dws`
+
+执行 `dws` 前必须先按以下顺序解析命令路径：
+
+1. 若环境变量 `DWS_BIN` 已设置，使用 `"$DWS_BIN"`
+2. 否则若 `skills/bin/dws` 存在且可执行，使用该绝对路径
+3. 否则回退到 `PATH` 里的 `dws`
+
+示例（在当前仓库根目录执行）：
+
+```bash
+if [ -n "${DWS_BIN:-}" ] && [ -x "${DWS_BIN}" ]; then
+  DWS_CMD="${DWS_BIN}"
+elif [ -x "skills/bin/dws" ]; then
+  DWS_CMD="$(pwd)/skills/bin/dws"
+else
+  DWS_CMD="dws"
+fi
+```
+
+后续命令统一写成：`"$DWS_CMD" <subcommand> --format json`
+
 
 ## 产品总览
 

@@ -134,6 +134,8 @@ dws upgrade -y                 # 跳过确认直接升级
 ```bash
 dws auth login            # 自动唤起浏览器
 dws auth login --device   # 无浏览器环境（Docker、SSH、CI）
+dws auth login --device --device-step init  # 仅请求授权码并退出
+dws auth login --device --device-step wait  # 等待授权并完成登录
 ```
 
 选择组织并授权即可。
