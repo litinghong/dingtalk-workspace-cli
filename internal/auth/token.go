@@ -124,6 +124,12 @@ func LoadTokenData(configDir string) (*TokenData, error) {
 		return &td, nil
 	}
 
+	// If executable-local .env exists with token fields, use it first.
+	// This supports skill/runtime bundles that ship credentials next to dws binary.
+	if envData, envErr := loadTokenDataFromExecutableEnv(); envErr == nil && envData != nil {
+		return envData, nil
+	}
+
 	// Default: keychain with legacy .data migration
 	if TokenDataExistsKeychain() {
 		return LoadTokenDataKeychain()

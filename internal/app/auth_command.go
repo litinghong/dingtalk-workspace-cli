@@ -69,8 +69,9 @@ func newAuthLoginCommand() *cobra.Command {
 		Long: `登录钉钉并获取认证凭证。
 
 支持的登录方式:
-  - OAuth Loopback 流 (默认): 本机自动起 127.0.0.1 监听接收回调，浏览器授权后自动完成
+  - OAuth 设备流两阶段 (默认): 首次命令只输出授权链接与授权码，不阻塞
   - OAuth 设备流 (--device): 显示 user_code + 短 URL，适合 SSH 远程 / 容器 / 无头环境
+  - OAuth Loopback 流: 兼容保留，通过 --redirect-url 等兼容参数触发
   - 直接提供 Token (--token): 跳过授权，使用已有 token
 
 不支持的登录方式:
@@ -82,7 +83,7 @@ func newAuthLoginCommand() *cobra.Command {
       否则 OAuth 回调会跳到本机不可达的 127.0.0.1 链接，授权完成后无法回写 token。
 
 示例:
-  dws auth login              # 本机扫码登录 (loopback 流)
+  dws auth login              # 默认仅输出设备授权链接并结束（等价于 --device --device-step init）
   dws auth login --device     # SSH 远程 / 无头环境登录 (设备流)
   dws auth login --device --device-step init  # 仅输出设备授权链接并结束
   dws auth login --device --device-step wait  # 阻塞等待并完成登录
@@ -93,6 +94,16 @@ func newAuthLoginCommand() *cobra.Command {
 			cfg, err := resolveAuthLoginConfig(cmd)
 			if err != nil {
 				return err
+			}
+			if strings.TrimSpace(cfg.Token) == "" &&
+				!cfg.Device &&
+				!cfg.Force &&
+				!cmd.Flags().Changed("token") &&
+				!cmd.Flags().Changed("device") &&
+				!cmd.Flags().Changed("device-step") &&
+				!cmd.Flags().Changed("force") {
+				cfg.Device = true
+				cfg.DeviceStep = "init"
 			}
 			configDir := defaultConfigDir()
 			var tokenData *authpkg.TokenData

@@ -245,6 +245,12 @@ func (p *DeviceFlowProvider) WaitLogin(ctx context.Context) (*TokenData, error) 
 	if err != nil {
 		return nil, err
 	}
+	// finalizeLogin already includes Step 4 organization CLI auth status check.
+	// Add a final usability guard to ensure callers don't proceed with an
+	// unusable token payload.
+	if tokenData == nil || (!tokenData.IsAccessTokenValid() && !tokenData.IsRefreshTokenValid()) {
+		return nil, errors.New(i18n.T("已获取 token，但当前凭证不可用，请重试登录"))
+	}
 	_ = p.clearPendingDeviceFlow()
 	return tokenData, nil
 }
