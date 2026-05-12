@@ -355,6 +355,38 @@ func TestRuntimeRunnerRejectsUnauthenticatedRequest(t *testing.T) {
 	}
 }
 
+func TestRuntimeRunnerRejectsUnauthenticatedRequestTriggersDeviceInit(t *testing.T) {
+	setupRuntimeCommandTest(t)
+	server := mockmcp.DefaultServer()
+	defer server.Close()
+
+	t.Setenv(cli.CatalogFixtureEnv, writeDocCatalogFixture(t, server.RemoteURL("/server/doc"), false))
+
+	called := 0
+	orig := runtimeDeviceAuthInit
+	runtimeDeviceAuthInit = func(context.Context) error {
+		called++
+		return nil
+	}
+	t.Cleanup(func() {
+		runtimeDeviceAuthInit = orig
+	})
+
+	cmd := NewRootCommand()
+	var stdout, stderr bytes.Buffer
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetArgs([]string{"mcp", "doc", "search_documents", "--json", `{"keyword":"design"}`})
+
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want authentication error")
+	}
+	if called != 1 {
+		t.Fatalf("runtimeDeviceAuthInit called %d times, want 1", called)
+	}
+}
+
 // TestRuntimeRunnerErrorsForUnavailableProduct pins down the post-fix
 // (fix-wukong-discovery-missing-servers Phase 3) behaviour: when the catalog
 // does not carry the requested product (here `contact` against a

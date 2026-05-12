@@ -51,7 +51,38 @@ fi
 30 天内使用一次即自动续期。
 
 ### 认证失败处理
-- 命令返回 `AUTH_TOKEN_EXPIRED` / `USER_TOKEN_ILLEGAL` / "Token验证失败" → 执行 `dws auth login` 重新登录
+- 任何**非 auth 子命令**返回以下登录态错误：
+  - `reason=not_authenticated`
+  - `message` 包含“未登录，请先执行 dws auth login”
+  - `hint` 包含“运行 'dws auth login' 完成登录后重试”
+  - `AUTH_TOKEN_EXPIRED` / `USER_TOKEN_ILLEGAL` / "Token验证失败"
+  处理流程统一为：
+  1. 先执行 `dws auth login --device --device-step init`
+  2. 从输出中提取并发给用户以下信息：
+     - 认证链接：`https://login.dingtalk.com/oauth2/device/verify.htm?user_code=...`（优先发送带 `user_code` 的直达链接）
+     - 授权码：`XXXX-XXXX`
+     - 过期时间（通常 900 秒）
+  3. 提示用户完成授权后回复“已授权”
+  4. 用户确认后执行 `dws auth login --device --device-step wait`
+  5. wait 成功后，重试原业务命令一次
+- 命令返回 `PAT_MEDIUM_RISK_NO_PERMISSION`，且 `data.desc` 提示“在浏览器中打开以下链接进行认证”：
+  1. 提取并输出 `data.uri` 给用户点击授权（不要由助手代点）
+  2. 同时可展示 `requiredScopes`、`grantOptions` 供用户确认授权范围
+  3. 等用户回复“已授权”后，重试原命令一次
+
+示例输出（面向用户）：
+
+```text
+检测到登录态已失效，请先完成设备授权。
+
+请打开以下链接（已带授权码）：
+https://login.dingtalk.com/oauth2/device/verify.htm?user_code=DXSR-VXJB
+
+若页面要求手动输入，授权码是：DXSR-VXJB
+该授权码将在 900 秒后过期。
+
+完成后请回复“已授权”，我会继续下一步认证并重试刚才的操作。
+```
 
 ### Headless 环境 (CI/CD)
 

@@ -12,6 +12,7 @@ cli_version: ">=1.0.15"
 - 不要使用 dws 命令以外的方式操作（禁止 curl、HTTP API、浏览器）
 - 不要编造 UUID、ID 等标识符，必须从命令返回中提取
 - 不要猜测字段名/参数值，操作前必须先查询确认
+- 认证场景下不要自行打开授权链接或代替用户授权；只能把 CLI 返回的链接原样提供给用户点击
 
 ## 严格要求 (MUST DO)
 - 所有命令必须加 `--format json` 以获取可解析输出
@@ -160,6 +161,25 @@ dws schema <path> --jq '.tool.required'      # 只看必填字段
 3. 仍然失败，报告完整错误信息给用户，禁止自行尝试替代方案
 4. 认证失败时，参考 [global-reference.md](./references/global-reference.md) 中的认证章节处理
 5. 各产品高频错误及排查流程见 [error-codes.md](./references/error-codes.md)
+
+### 授权链接透出（必须执行）
+当**非 auth 子命令**返回以下任一信号时，不得判定为“运行失败结束”，而是进入“等待用户授权”状态并输出链接：
+
+- `reason=not_authenticated`
+- `message` 包含“未登录，请先执行 dws auth login”
+- `hint` 包含“运行 'dws auth login' 完成登录后重试”
+- `code=PAT_MEDIUM_RISK_NO_PERMISSION`
+- `data.desc` 包含“在浏览器中打开以下链接进行认证”
+- 返回体存在 `data.uri`（通常同时有 `flowId`、`userCode`、`grantOptions`）
+
+处理要求：
+1. 立即自行执行一次 `"$DWS_CMD" auth login --device --device-step init`
+2. 若 init 输出设备流链接/授权码，原样发给用户点击授权（不要由助手代点）
+3. 若原错误已包含 `data.uri`，也可直接输出该链接给用户
+4. 明确告知用户先完成授权，再回复“已授权”
+5. 用户确认后执行 `"$DWS_CMD" auth login --device --device-step wait`
+6. wait 成功后，重试原命令一次（参数保持不变）
+7. 在用户未确认授权前，不要继续同类写操作
 
 
 ## 详细参考 (按需读取)

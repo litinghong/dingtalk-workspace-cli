@@ -33,6 +33,7 @@ import (
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/logging"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/safety"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/internal/transport"
+	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/pkg/config"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/pkg/configmeta"
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/pkg/edition"
 )
@@ -100,6 +101,7 @@ const (
 // ONLY the derived booleans — never the env value, token, client-id or
 // flow-id — so logs remain safe to attach to issues.
 var hostOwnedPATDecisionOnce sync.Once
+var runtimeDeviceAuthInit = startRuntimeDeviceAuthInit
 
 // logHostOwnedPATDecisionOnce emits the single-shot debug trace. It is
 // called lazily from the runtime Run path (which executes AFTER
@@ -339,11 +341,21 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 	// Fail-fast: reject unauthenticated requests before making network calls.
 	// This provides a clear error message instead of cryptic HTTP 400 from MCP.
 	if strings.TrimSpace(authToken) == "" {
+		initErr := runtimeDeviceAuthInit(ctx)
+		hint := "已自动发起设备授权，请在浏览器完成授权后执行 'dws auth login --device --device-step wait'，然后重试原命令。"
+		actions := []string{"dws auth login --device --device-step wait"}
+		if initErr != nil {
+			hint = fmt.Sprintf("自动发起设备授权失败：%v。请手动执行 'dws auth login --device --device-step init' 获取授权链接。", initErr)
+			actions = []string{
+				"dws auth login --device --device-step init",
+				"dws auth login --device --device-step wait",
+			}
+		}
 		return executor.Result{}, apperrors.NewAuth(
 			"未登录，请先执行 dws auth login",
 			apperrors.WithReason("not_authenticated"),
-			apperrors.WithHint("运行 'dws auth login' 完成登录后重试"),
-			apperrors.WithActions("dws auth login"),
+			apperrors.WithHint(hint),
+			apperrors.WithActions(actions...),
 		)
 	}
 
@@ -374,6 +386,9 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 					captureRuntimeFailure(invocation, err, overrideErr)
 					return executor.Result{}, overrideErr
 				}
+			}
+			if shouldAutoInitDeviceFlow(err) {
+				_ = runtimeDeviceAuthInit(ctx)
 			}
 		}
 		// PAT scope error: offer human-readable output and retry after authorization
@@ -627,6 +642,45 @@ func isAuthError(err error) bool {
 		return appErr.Category == apperrors.CategoryAuth
 	}
 	return false
+}
+
+func shouldAutoInitDeviceFlow(err error) bool {
+	if err == nil || isPatScopeError(err) {
+		return false
+	}
+
+	var appErr *apperrors.Error
+	if errors.As(err, &appErr) {
+		text := strings.ToLower(strings.TrimSpace(appErr.Message + " " + appErr.Reason + " " + appErr.Hint))
+		if appErr.Reason == "not_authenticated" || appErr.Reason == "http_401" {
+			return true
+		}
+		if strings.Contains(text, "auth_token_expired") ||
+			strings.Contains(text, "user_token_illegal") ||
+			strings.Contains(text, "token验证失败") ||
+			strings.Contains(text, "未登录") ||
+			strings.Contains(text, "not logged in") ||
+			strings.Contains(text, "all credentials have expired") ||
+			strings.Contains(text, "所有凭证已失效") {
+			return true
+		}
+	}
+
+	msg := strings.ToLower(strings.TrimSpace(err.Error()))
+	return strings.Contains(msg, "未登录") ||
+		strings.Contains(msg, "not logged in") ||
+		strings.Contains(msg, "auth_token_expired") ||
+		strings.Contains(msg, "user_token_illegal") ||
+		strings.Contains(msg, "token验证失败")
+}
+
+func startRuntimeDeviceAuthInit(_ context.Context) error {
+	loginCtx, cancel := context.WithTimeout(context.Background(), config.DeviceFlowTimeout)
+	defer cancel()
+
+	provider := authpkg.NewDeviceFlowProvider(defaultConfigDir(), nil)
+	provider.Output = os.Stderr
+	return provider.InitLogin(loginCtx)
 }
 
 func productEndpointOverride(productID string) (string, bool) {
