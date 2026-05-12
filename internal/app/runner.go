@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -106,6 +107,7 @@ const (
 // flow-id — so logs remain safe to attach to issues.
 var hostOwnedPATDecisionOnce sync.Once
 var runtimeDeviceAuthInit = startRuntimeDeviceAuthInit
+var runtimeDeviceAuthWait = startRuntimeDeviceAuthWait
 
 type deviceAuthInitResult struct {
 	Link string
@@ -363,6 +365,7 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 	if strings.TrimSpace(authToken) == "" {
 		initRes, initErr := runtimeDeviceAuthInit(ctx)
 		if initErr == nil && initRes != nil && strings.TrimSpace(initRes.Link) != "" {
+			_ = runtimeDeviceAuthWait(ctx)
 			return executor.Result{}, &authPromptHandledError{raw: buildDeviceAuthPrompt(initRes.Link)}
 		}
 		hint := "自动发起设备授权失败，请手动执行 'dws auth login --device --device-step init' 获取授权链接。"
@@ -406,6 +409,7 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 			if shouldAutoInitDeviceFlow(err) {
 				initRes, initErr := runtimeDeviceAuthInit(ctx)
 				if initErr == nil && initRes != nil && strings.TrimSpace(initRes.Link) != "" {
+					_ = runtimeDeviceAuthWait(ctx)
 					handled := &authPromptHandledError{raw: buildDeviceAuthPrompt(initRes.Link)}
 					captureRuntimeFailure(invocation, err, handled)
 					return executor.Result{}, handled
@@ -713,6 +717,40 @@ func startRuntimeDeviceAuthInit(_ context.Context) (*deviceAuthInitResult, error
 		return nil, err
 	}
 	return &deviceAuthInitResult{Link: link}, nil
+}
+
+func startRuntimeDeviceAuthWait(_ context.Context) error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+
+	configDir := defaultConfigDir()
+	logDir := filepath.Join(configDir, "logs")
+	if mkErr := os.MkdirAll(logDir, 0o700); mkErr != nil {
+		return mkErr
+	}
+	logFile, err := os.OpenFile(filepath.Join(logDir, "device_auth_wait.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+
+	cmd := exec.Command(exePath, "auth", "login", "--device", "--device-step", "wait")
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.Env = append(os.Environ(), "DWS_DEVICE_AUTH_WAIT_BACKGROUND=1")
+
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return err
+	}
+
+	go func() {
+		_ = cmd.Wait()
+		_ = logFile.Close()
+	}()
+	return nil
 }
 
 type deviceFlowPendingSnapshot struct {

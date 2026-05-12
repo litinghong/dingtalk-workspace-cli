@@ -363,13 +363,20 @@ func TestRuntimeRunnerRejectsUnauthenticatedRequestTriggersDeviceInit(t *testing
 	t.Setenv(cli.CatalogFixtureEnv, writeDocCatalogFixture(t, server.RemoteURL("/server/doc"), false))
 
 	called := 0
+	waitCalled := 0
 	orig := runtimeDeviceAuthInit
+	origWait := runtimeDeviceAuthWait
 	runtimeDeviceAuthInit = func(context.Context) (*deviceAuthInitResult, error) {
 		called++
 		return &deviceAuthInitResult{Link: "https://login.dingtalk.com/oauth2/device/verify.htm?user_code=TEST-CODE"}, nil
 	}
+	runtimeDeviceAuthWait = func(context.Context) error {
+		waitCalled++
+		return nil
+	}
 	t.Cleanup(func() {
 		runtimeDeviceAuthInit = orig
+		runtimeDeviceAuthWait = origWait
 	})
 
 	cmd := NewRootCommand()
@@ -384,6 +391,9 @@ func TestRuntimeRunnerRejectsUnauthenticatedRequestTriggersDeviceInit(t *testing
 	}
 	if called != 1 {
 		t.Fatalf("runtimeDeviceAuthInit called %d times, want 1", called)
+	}
+	if waitCalled != 1 {
+		t.Fatalf("runtimeDeviceAuthWait called %d times, want 1", waitCalled)
 	}
 }
 
