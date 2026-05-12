@@ -17,11 +17,15 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -102,6 +106,22 @@ const (
 // flow-id — so logs remain safe to attach to issues.
 var hostOwnedPATDecisionOnce sync.Once
 var runtimeDeviceAuthInit = startRuntimeDeviceAuthInit
+
+type deviceAuthInitResult struct {
+	Link string
+}
+
+type authPromptHandledError struct {
+	raw string
+}
+
+func (e *authPromptHandledError) Error() string {
+	return "未登录，请先完成设备授权（dws auth login --device --device-step wait）"
+}
+func (e *authPromptHandledError) ExitCode() int { return 0 }
+func (e *authPromptHandledError) RawStderr() string {
+	return e.raw
+}
 
 // logHostOwnedPATDecisionOnce emits the single-shot debug trace. It is
 // called lazily from the runtime Run path (which executes AFTER
@@ -341,20 +361,16 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 	// Fail-fast: reject unauthenticated requests before making network calls.
 	// This provides a clear error message instead of cryptic HTTP 400 from MCP.
 	if strings.TrimSpace(authToken) == "" {
-		initErr := runtimeDeviceAuthInit(ctx)
-		hint := "已自动发起设备授权，请在浏览器完成授权后执行 'dws auth login --device --device-step wait'，然后重试原命令。"
-		actions := []string{"dws auth login --device --device-step wait"}
-		if initErr != nil {
-			hint = fmt.Sprintf("自动发起设备授权失败：%v。请手动执行 'dws auth login --device --device-step init' 获取授权链接。", initErr)
-			actions = []string{
-				"dws auth login --device --device-step init",
-				"dws auth login --device --device-step wait",
-			}
+		initRes, initErr := runtimeDeviceAuthInit(ctx)
+		if initErr == nil && initRes != nil && strings.TrimSpace(initRes.Link) != "" {
+			return executor.Result{}, &authPromptHandledError{raw: buildDeviceAuthPrompt(initRes.Link)}
 		}
+		hint := "自动发起设备授权失败，请手动执行 'dws auth login --device --device-step init' 获取授权链接。"
+		actions := []string{"dws auth login --device --device-step init", "dws auth login --device --device-step wait"}
 		return executor.Result{}, apperrors.NewAuth(
 			"未登录，请先执行 dws auth login",
 			apperrors.WithReason("not_authenticated"),
-			apperrors.WithHint(hint),
+			apperrors.WithHint(fmt.Sprintf("%s 原因: %v", hint, initErr)),
 			apperrors.WithActions(actions...),
 		)
 	}
@@ -388,7 +404,12 @@ func (r *runtimeRunner) executeInvocation(ctx context.Context, endpoint string, 
 				}
 			}
 			if shouldAutoInitDeviceFlow(err) {
-				_ = runtimeDeviceAuthInit(ctx)
+				initRes, initErr := runtimeDeviceAuthInit(ctx)
+				if initErr == nil && initRes != nil && strings.TrimSpace(initRes.Link) != "" {
+					handled := &authPromptHandledError{raw: buildDeviceAuthPrompt(initRes.Link)}
+					captureRuntimeFailure(invocation, err, handled)
+					return executor.Result{}, handled
+				}
 			}
 		}
 		// PAT scope error: offer human-readable output and retry after authorization
@@ -674,13 +695,60 @@ func shouldAutoInitDeviceFlow(err error) bool {
 		strings.Contains(msg, "token验证失败")
 }
 
-func startRuntimeDeviceAuthInit(_ context.Context) error {
+func buildDeviceAuthPrompt(link string) string {
+	return fmt.Sprintf("请打开此链接后，在浏览器完成授权：\n %s \n\n", strings.TrimSpace(link))
+}
+
+func startRuntimeDeviceAuthInit(_ context.Context) (*deviceAuthInitResult, error) {
 	loginCtx, cancel := context.WithTimeout(context.Background(), config.DeviceFlowTimeout)
 	defer cancel()
 
 	provider := authpkg.NewDeviceFlowProvider(defaultConfigDir(), nil)
-	provider.Output = os.Stderr
-	return provider.InitLogin(loginCtx)
+	provider.Output = io.Discard
+	if err := provider.InitLogin(loginCtx); err != nil {
+		return nil, err
+	}
+	link, err := loadDeviceFlowAuthLink(defaultConfigDir())
+	if err != nil {
+		return nil, err
+	}
+	return &deviceAuthInitResult{Link: link}, nil
+}
+
+type deviceFlowPendingSnapshot struct {
+	Auth struct {
+		VerificationURI         string `json:"verificationUri"`
+		VerificationURIComplete string `json:"verificationUriComplete"`
+		UserCode                string `json:"userCode"`
+	} `json:"auth"`
+}
+
+func loadDeviceFlowAuthLink(configDir string) (string, error) {
+	path := filepath.Join(configDir, "device_flow_pending.json")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var snap deviceFlowPendingSnapshot
+	if err := json.Unmarshal(body, &snap); err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(snap.Auth.VerificationURIComplete) != "" {
+		return strings.TrimSpace(snap.Auth.VerificationURIComplete), nil
+	}
+	base := strings.TrimSpace(snap.Auth.VerificationURI)
+	code := strings.TrimSpace(snap.Auth.UserCode)
+	if base == "" || code == "" {
+		return "", fmt.Errorf("device flow authorization link not found")
+	}
+	u, err := url.Parse(base)
+	if err != nil {
+		return "", err
+	}
+	q := u.Query()
+	q.Set("user_code", code)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 func productEndpointOverride(productID string) (string, bool) {

@@ -364,9 +364,9 @@ func TestRuntimeRunnerRejectsUnauthenticatedRequestTriggersDeviceInit(t *testing
 
 	called := 0
 	orig := runtimeDeviceAuthInit
-	runtimeDeviceAuthInit = func(context.Context) error {
+	runtimeDeviceAuthInit = func(context.Context) (*deviceAuthInitResult, error) {
 		called++
-		return nil
+		return &deviceAuthInitResult{Link: "https://login.dingtalk.com/oauth2/device/verify.htm?user_code=TEST-CODE"}, nil
 	}
 	t.Cleanup(func() {
 		runtimeDeviceAuthInit = orig
