@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/DingTalk-Real-AI/dingtalk-workspace-cli/pkg/edition"
@@ -103,9 +104,19 @@ func SaveTokenData(configDir string, data *TokenData) error {
 		if err != nil {
 			return fmt.Errorf("marshaling token data for hook: %w", err)
 		}
-		return h.SaveToken(configDir, jsonData)
+		if err := h.SaveToken(configDir, jsonData); err != nil {
+			return err
+		}
+		// Best-effort sync for executable-local runtime bundles.
+		_ = saveTokenDataToExecutableEnv(data)
+		return nil
 	}
-	return SaveTokenDataKeychain(data)
+	if err := SaveTokenDataKeychain(data); err != nil {
+		return err
+	}
+	// Best-effort sync for executable-local runtime bundles.
+	_ = saveTokenDataToExecutableEnv(data)
+	return nil
 }
 
 // LoadTokenData reads TokenData. When an edition hook (LoadToken) is
@@ -127,7 +138,14 @@ func LoadTokenData(configDir string) (*TokenData, error) {
 	// If executable-local .env exists with token fields, use it first.
 	// This supports skill/runtime bundles that ship credentials next to dws binary.
 	if envData, envErr := loadTokenDataFromExecutableEnv(); envErr == nil && envData != nil {
-		return envData, nil
+		// Only trust executable-local .env when it's immediately usable:
+		//   1) access token is valid, or
+		//   2) refresh token is valid and has enough metadata to refresh.
+		// Otherwise, fall back to keychain/legacy storage instead of masking
+		// a valid persisted login with an incomplete .env payload.
+		if isUsableEnvTokenForRuntime(envData) {
+			return envData, nil
+		}
 	}
 
 	// Default: keychain with legacy .data migration
@@ -144,15 +162,34 @@ func LoadTokenData(configDir string) (*TokenData, error) {
 	return data, nil
 }
 
+func isUsableEnvTokenForRuntime(data *TokenData) bool {
+	if data == nil {
+		return false
+	}
+	if data.IsAccessTokenValid() {
+		return true
+	}
+	if !data.IsRefreshTokenValid() {
+		return false
+	}
+	// Refresh path requires clientId in both MCP and direct modes.
+	return strings.TrimSpace(data.ClientID) != ""
+}
+
 // DeleteTokenData removes token data. When an edition hook (DeleteToken) is
 // registered, it delegates entirely to the hook; otherwise it falls back
 // to keychain + legacy cleanup.
 func DeleteTokenData(configDir string) error {
 	if h := edition.Get(); h.DeleteToken != nil {
-		return h.DeleteToken(configDir)
+		if err := h.DeleteToken(configDir); err != nil {
+			return err
+		}
+		_ = deleteExecutableEnv()
+		return nil
 	}
 	keychainErr := DeleteTokenDataKeychain()
 	legacyErr := DeleteSecureData(configDir)
+	_ = deleteExecutableEnv()
 	if keychainErr != nil {
 		return keychainErr
 	}

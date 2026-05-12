@@ -184,3 +184,61 @@ func TestTokenValidityChecks(t *testing.T) {
 		t.Fatal("expired refresh token should be invalid")
 	}
 }
+
+func TestIsUsableEnvTokenForRuntime(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		data *TokenData
+		want bool
+	}{
+		{
+			name: "valid access token",
+			data: &TokenData{
+				AccessToken: "at",
+				ExpiresAt:   time.Now().Add(2 * time.Hour),
+			},
+			want: true,
+		},
+		{
+			name: "expired access with refresh and client id",
+			data: &TokenData{
+				AccessToken:  "at",
+				RefreshToken: "rt",
+				ExpiresAt:    time.Now().Add(-time.Hour),
+				RefreshExpAt: time.Now().Add(24 * time.Hour),
+				ClientID:     "cid",
+			},
+			want: true,
+		},
+		{
+			name: "expired access with refresh but missing client id",
+			data: &TokenData{
+				AccessToken:  "at",
+				RefreshToken: "rt",
+				ExpiresAt:    time.Now().Add(-time.Hour),
+				RefreshExpAt: time.Now().Add(24 * time.Hour),
+			},
+			want: false,
+		},
+		{
+			name: "no refresh and expired access",
+			data: &TokenData{
+				AccessToken: "at",
+				ExpiresAt:   time.Now().Add(-time.Hour),
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isUsableEnvTokenForRuntime(tt.data); got != tt.want {
+				t.Fatalf("isUsableEnvTokenForRuntime() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

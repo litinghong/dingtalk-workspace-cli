@@ -29,15 +29,10 @@ var envTokenFieldOrder = []string{
 // 1) key-value lines: access_token=xxx
 // 2) positional lines by fixed order defined in envTokenFieldOrder.
 func loadTokenDataFromExecutableEnv() (*TokenData, error) {
-	exePath, err := os.Executable()
+	envPath, err := executableEnvPath()
 	if err != nil {
 		return nil, err
 	}
-	realPath, err := filepath.EvalSymlinks(exePath)
-	if err != nil {
-		realPath = exePath
-	}
-	envPath := filepath.Join(filepath.Dir(realPath), ".env")
 
 	f, err := os.Open(envPath)
 	if err != nil {
@@ -111,6 +106,54 @@ func loadTokenDataFromExecutableEnv() (*TokenData, error) {
 	return data, nil
 }
 
+func saveTokenDataToExecutableEnv(data *TokenData) error {
+	if data == nil {
+		return errors.New("token data is nil")
+	}
+	envPath, err := executableEnvPath()
+	if err != nil {
+		return err
+	}
+	lines := []string{
+		fmt.Sprintf("access_token=%s", data.AccessToken),
+		fmt.Sprintf("refresh_token=%s", data.RefreshToken),
+		fmt.Sprintf("persistent_code=%s", data.PersistentCode),
+		fmt.Sprintf("expires_at=%s", data.ExpiresAt.UTC().Format(time.RFC3339)),
+		fmt.Sprintf("refresh_expires_at=%s", data.RefreshExpAt.UTC().Format(time.RFC3339)),
+		fmt.Sprintf("corp_id=%s", data.CorpID),
+		fmt.Sprintf("user_id=%s", data.UserID),
+		fmt.Sprintf("user_name=%s", data.UserName),
+		fmt.Sprintf("corp_name=%s", data.CorpName),
+		fmt.Sprintf("client_id=%s", data.ClientID),
+		fmt.Sprintf("source=%s", data.Source),
+	}
+	content := strings.Join(lines, "\n") + "\n"
+	return os.WriteFile(envPath, []byte(content), 0o600)
+}
+
+func executableEnvPath() (string, error) {
+	exePath, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	realPath, err := filepath.EvalSymlinks(exePath)
+	if err != nil {
+		realPath = exePath
+	}
+	return filepath.Join(filepath.Dir(realPath), ".env"), nil
+}
+
+func deleteExecutableEnv() error {
+	envPath, err := executableEnvPath()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(envPath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func parseRFC3339OrDefault(raw string, fallback time.Time) (time.Time, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
@@ -122,4 +165,3 @@ func parseRFC3339OrDefault(raw string, fallback time.Time) (time.Time, error) {
 	}
 	return t, nil
 }
-

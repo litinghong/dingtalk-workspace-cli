@@ -222,6 +222,9 @@ func (p *DeviceFlowProvider) WaitLogin(ctx context.Context) (*TokenData, error) 
 		return nil, errors.New(i18n.T("设备流会话缺少 client_id，请重新执行 dws auth login --device --device-step init"))
 	}
 	p.clientID = pending.ClientID
+	// wait step may run in a new process. restore MCP-sourced client identity
+	// so Step 3 exchange uses MCP endpoint instead of direct clientSecret mode.
+	SetClientIDFromMCP(p.clientID)
 
 	auth := pending.Auth
 	if !pending.Created.IsZero() && auth.ExpiresIn > 0 {
