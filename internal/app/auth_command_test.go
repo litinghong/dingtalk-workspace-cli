@@ -17,6 +17,7 @@ import (
 	"bytes"
 	"errors"
 	"net/http"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -81,4 +82,20 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 	return f(req)
+}
+
+func TestSpawnDeviceFlowWaitInBackground(t *testing.T) {
+	configDir := t.TempDir()
+
+	orig := newDeviceWaitCommand
+	newDeviceWaitCommand = func(_ string) *exec.Cmd {
+		return exec.Command("sh", "-c", "exit 0")
+	}
+	t.Cleanup(func() {
+		newDeviceWaitCommand = orig
+	})
+
+	if err := spawnDeviceFlowWaitInBackground(configDir); err != nil {
+		t.Fatalf("spawnDeviceFlowWaitInBackground() error = %v", err)
+	}
 }

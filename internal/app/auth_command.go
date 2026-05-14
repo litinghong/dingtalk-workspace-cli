@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -35,6 +36,11 @@ type authLoginConfig struct {
 	Force      bool
 	Device     bool
 	DeviceStep string
+}
+
+var startDeviceFlowWaitInBackground = spawnDeviceFlowWaitInBackground
+var newDeviceWaitCommand = func(exePath string) *exec.Cmd {
+	return exec.Command(exePath, "auth", "login", "--device", "--device-step", "wait")
 }
 
 func buildAuthCommand() *cobra.Command {
@@ -128,7 +134,10 @@ func newAuthLoginCommand() *cobra.Command {
 					if err = provider.InitLogin(loginCtx); err != nil {
 						return apperrors.NewAuth(fmt.Sprintf("device authorization init failed: %v", err))
 					}
-					fmt.Fprintln(cmd.OutOrStdout(), "[OK] 设备授权信息已生成，请在完成浏览器授权后执行: dws auth login --device --device-step wait")
+					if waitErr := startDeviceFlowWaitInBackground(configDir); waitErr != nil {
+						fmt.Fprintf(cmd.ErrOrStderr(), "[WARN] 后台授权校验进程启动失败: %v\n", waitErr)
+					}
+					fmt.Fprintln(cmd.OutOrStdout(), "[OK] 设备授权信息已生成，已在后台启动授权结果校验进程。")
 					return nil
 				case "wait":
 					tokenData, err = provider.WaitLogin(loginCtx)
@@ -581,4 +590,37 @@ func writeAuthLoginJSON(w io.Writer, data *authpkg.TokenData, forced bool) error
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(resp)
+}
+
+func spawnDeviceFlowWaitInBackground(configDir string) error {
+	exePath, err := os.Executable()
+	if err != nil {
+		return err
+	}
+
+	logDir := filepath.Join(configDir, "logs")
+	if err := os.MkdirAll(logDir, 0o700); err != nil {
+		return err
+	}
+	logFile, err := os.OpenFile(filepath.Join(logDir, "device_auth_wait.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+
+	cmd := newDeviceWaitCommand(exePath)
+	cmd.Stdout = logFile
+	cmd.Stderr = logFile
+	cmd.Stdin = nil
+	cmd.Env = append(os.Environ(), "DWS_DEVICE_AUTH_WAIT_BACKGROUND=1")
+
+	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
+		return err
+	}
+
+	go func() {
+		_ = cmd.Wait()
+		_ = logFile.Close()
+	}()
+	return nil
 }
